@@ -1,0 +1,257 @@
+List Container Usage Guide
+==========================
+
+1. Overview
+-----------
+This package provides three variants of an industrial-grade dynamic array
+container named 'List', designed as a C++ alternative to std::vector/deque
+and Python list.
+
+* List.hpp          - Base version, requires C++14.
+* List_pro.hpp      - Enhanced version, requires C++17/20.
+* List_compatible.hpp - DevC++ 5.11 compatible version (GCC 4.9.2, partial C++14).
+
+All versions offer:
+  - std::allocator support with EBO (Empty Base Optimization)
+  - Full iterator suite (random access, reverse, const)
+  - Strong exception safety guarantee
+  - Optimized trivial-type fast paths (memcpy/memmove)
+  - Self-checking invariants in debug builds
+  - Built-in algorithms: sort, find, binary search, rotate, slice, etc.
+
+2. File Selection Guide
+-----------------------
++---------------------------------------------------+---------------+
+| Environment                                       | Use           |
++---------------------------------------------------+---------------+
+| Modern compiler (GCC 8+, Clang 7+, MSVC 2019+)    | List_pro.hpp  |
+| C++14 only compiler                               | List.hpp      |
+| DevC++ 5.11 / TDM-GCC 4.9.2                       | List_compatible.hpp |
++---------------------------------------------------+---------------+
+
+3. Quick Start
+--------------
+#include "List.hpp"    // or List_pro.hpp / List_compatible.hpp
+
+int main() {
+    List<int> a;                  // empty list
+    List<int> b(5, 42);           // [42, 42, 42, 42, 42]
+    List<int> c = {1, 2, 3, 4};   // initializer list
+
+    b.push_back(100);             // append
+    b.pop_back();                 // remove last
+    b.insert(b.cbegin(), 0);      // insert at position
+    b.erase(b.cbegin());          // erase at position
+
+    b.sort();                     // ascending sort
+    b.reverse();                  // reverse order
+
+    for (auto& x : b) { /*...*/ } // range-based for
+}
+
+4. Type Aliases
+---------------
+value_type, allocator_type, size_type, difference_type
+reference, const_reference, pointer, const_pointer
+iterator, const_iterator, reverse_iterator, const_reverse_iterator
+
+5. Constructors
+---------------
+List()                          // default
+List(size_type n)               // n default-constructed elements
+List(size_type n, const T& v)   // n copies of v
+List(initializer_list<T>)       // from {a, b, c}
+List(InputIt first, InputIt last)// from iterator range
+List(const List& o)             // deep copy
+List(List&& o)                  // move
+List(const List& o, Alloc a)    // copy with allocator
+List(List&& o, Alloc a)         // move with allocator
+
+6. Element Access
+-----------------
+at(i)           // bounds-checked, throws std::out_of_range
+operator[i]      // unchecked
+front()          // first element, throws if empty
+back()           // last element, throws if empty
+data()           // raw pointer to elements
+
+7. Iterators
+------------
+begin()/end()           cbegin()/cend()
+rbegin()/rend()         crbegin()/crend()
+All iterators are random access.
+
+8. Capacity
+-----------
+empty()          // true if size==0
+size()           // number of elements
+capacity()       // allocated capacity
+reserve(n)       // pre-allocate for n elements
+shrink_to_fit()  // reduce capacity to size
+
+9. Modifiers
+------------
+push_back(val) / push_back(T&&)
+pop_back()
+push_front(val) / push_front(T&&)
+pop_front()
+
+insert(pos, val) / insert(pos, T&&)            // single element
+insert(pos, n, val)                            // n copies
+insert(pos, first, last)                       // iterator range
+insert(pos, {a, b, c})                         // initializer list
+
+emplace(pos, args...)                          // construct in-place
+emplace_back(args...)                          // append in-place
+emplace_front(args...)                         // prepend in-place
+
+erase(pos)                                     // single element
+erase(first, last)                             // range
+remove(val)                                    // remove first occurrence
+remove_all(val)                                // remove all occurrences
+remove_if(pred)                                // remove first matching pred
+remove_all_if(pred)                            // remove all matching pred
+
+pop(index=npos)                                // extract and return element
+
+resize(n)                                      // grow/shrink
+resize(n, val)                                 // grow/shrink with value
+
+clear()                                        // remove all
+swap(other)                                    // swap contents
+
+10. Algorithms
+--------------
+Sort / Order:
+  sort(Order::Ascending / Descending)
+  sort(Compare comp)
+  stable_sort() / stable_sort(comp)
+  is_sorted() / is_sorted(comp)
+
+Transform:
+  reverse()
+  rotate_left(n) / rotate_right(n)
+  swap_at(i, j)
+
+Dedup:
+  unique()             // remove consecutive duplicates
+  unique_all()         // remove all duplicates (sorts first)
+
+Search (sorted list required for binary search):
+  find(val) -> int                     // first index, -1 if not found
+  find_if(pred) -> int
+  rfind(val) -> int                    // last index, -1 if not found
+  rfind_if(pred) -> int
+  index(val) -> size_type              // throws if not found
+  contains(val) -> bool
+  lower_bound(val) -> size_type
+  upper_bound(val) -> size_type
+  binary_search(val) -> bool
+  equal_range(val) -> pair<size_type, size_type>
+
+Count:
+  count(val) -> size_type
+  count_if(pred) -> size_type
+
+Replace:
+  replace(old_val, new_val)            // replace first occurrence
+  replace_all(old_val, new_val)        // replace all occurrences
+  replace_if(pred, new_val)            // replace first matching
+  replace_all_if(pred, new_val)        // replace all matching
+
+Logic:
+  all_of(pred) -> bool
+  any_of(pred) -> bool
+  none_of(pred) -> bool
+
+Math / Stats:
+  min() / max()         // throws if empty
+  sum() / product()     // throws if empty
+  average() -> double   // throws if empty
+  median()              // throws if empty
+  accumulate(init=0) -> T
+  accumulate(init, BinaryOp) -> T
+
+Generation:
+  fill(val)             // assign val to all elements
+  iota(start_val)       // fill with incrementing sequence
+  generate(Gen g)       // fill with generator function
+  shuffle(RNG&& rng)    // random shuffle
+
+Traversal:
+  for_each(UnaryFunc f) -> List&   // supports chaining
+
+Slice / Concat:
+  slice(start, end, step=1) -> List   // Python-style slice
+  copy() -> List                      // deep copy
+  starts_with(List) -> bool
+  ends_with(List) -> bool
+
+11. Operators
+-------------
+operator[]           // subscript
+operator== / !=      // equality
+operator< / > / <= / >=  // lexicographical compare
+operator+            // concatenate (returns new List)
+operator+=           // append in-place
+
+12. Order Enum
+--------------
+List<T>::Order::Ascending   // for sort
+List<T>::Order::Descending  // for sort
+
+13. Non-member Functions
+------------------------
+swap(List&, List&)
+erase(List&, const U& val)      // C++20 style, returns count
+erase_if(List&, Pred pred)      // C++20 style, returns count
+
+14. Deduction Guides (C++17+)
+-----------------------------
+List{1, 2, 3} deduces List<int>.
+
+15. Allocator Support
+---------------------
+List uses std::allocator_traits for full allocator compatibility.
+POCCA/POCMA/POCS tags are respected for stateful allocators.
+
+16. Exception Safety
+--------------------
+All modifying operations provide strong exception safety.
+If an exception occurs during insertion/resize, the List remains
+in its original valid state.
+
+17. Thread Safety
+-----------------
+This container is NOT thread-safe. External synchronization is
+required for concurrent access.
+
+18. Debug Mode
+--------------
+Define NDEBUG or LIST_NO_SELF_CHECK to disable invariant checks.
+Without these, the container self-checks size/capacity invariants.
+
+19. Performance Notes
+---------------------
+- Growth factor: 1.5x (optimal for memory reuse)
+- Trivially copyable types use memcpy/memmove
+- Relocation uses move when noexcept, copy otherwise
+- Reserve capacity before bulk inserts to avoid reallocations
+
+20. Version Differences
+-----------------------
++---------------+--------+----------+---------------+
+| Feature       | List   | List_pro | List_compatible |
++---------------+--------+----------+---------------+
+| C++ standard  | C++14  | C++17/20 | C++14 (partial) |
+| if constexpr  | no     | yes      | no            |
+| nodiscard     | no     | yes      | no            |
+| likely/unlikely| no    | yes      | no            |
+| spaceship <=> | no     | yes (C++20)| no          |
+| std::destroy  | no     | yes      | no            |
+| std::uninitialized_move| no | yes | no            |
+| deduction guides| yes (ifdef) | yes | no          |
+| is_trivially_copyable polyfill | no | no | yes   |
++---------------+--------+----------+---------------+
+
+End of document.
