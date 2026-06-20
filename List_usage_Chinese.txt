@@ -1,0 +1,231 @@
+List 容器使用指南（中文版）
+==============================
+
+1. 概述
+-----------
+本包提供三种工业级动态数组容器 List，作为 C++ std::vector/deque 与 Python list 的高效替代方案。
+- List.hpp          基础版，要求 C++14
+- List_pro.hpp      增强版，要求 C++17/20
+- List_compatible.hpp 兼容 DevC++ 5.11（GCC 4.9.2，部分 C++14）
+
+所有版本均支持：
+  - std::allocator 支持 + EBO 空基类优化
+  - 完整迭代器（随机访问、反向、常量）
+  - 强异常安全保证
+  - 可平凡复制类型高速路径（memcpy/memmove）
+  - 调试模式自动自检
+  - 内置算法：sort、find、binary_search、rotate、slice 等
+
+2. 文件选择指南
+-----------------------
+现代编译器（GCC8+、Clang7+、MSVC2019+）    List_pro.hpp
+仅支持 C++14                              List.hpp
+DevC++ 5.11 / TDM-GCC 4.9.2               List_compatible.hpp
+
+3. 快速上手
+--------------
+#include "List.hpp"    // 或 List_pro.hpp / List_compatible.hpp
+
+int main() {
+    List<int> a;                  // 空列表
+    List<int> b(5, 42);           // [42,42,42,42,42]
+    List<int> c = {1,2,3,4};      // 初始化列表
+    b.push_back(100);             // 尾部添加
+    b.pop_back();                 // 删除尾部
+    b.insert(b.cbegin(), 0);      // 头部插入
+    b.erase(b.cbegin());          // 删除头部
+    b.sort();                     // 升序排序
+    b.reverse();                  // 反转
+
+    for (auto& x : b) {}          // 范围for遍历
+}
+
+4. 类型别名
+---------------
+value_type, allocator_type, size_type, difference_type
+reference, const_reference, pointer, const_pointer
+iterator, const_iterator, reverse_iterator, const_reverse_iterator
+
+5. 构造函数
+---------------
+List()                          // 默认空
+List(size_type n)               // n 个默认构造元素
+List(size_type n, const T& v)    // n 个 v 的副本
+List(initializer_list<T>)        // 从 {a,b,c} 构造
+List(InputIt first, InputIt last) // 从迭代器区间构造
+List(const List& o)              // 深拷贝
+List(List&& o)                   // 移动构造
+List(const List& o, Alloc a)     // 带分配器拷贝
+List(List&& o, Alloc a)          // 带分配器移动
+
+6. 元素访问
+-----------------
+at(i)           带越界检查，抛出 std::out_of_range
+operator[i]     无检查直接访问
+front()         首元素，空时抛异常
+back()          尾元素，空时抛异常
+data()          返回底层数组裸指针
+
+7. 迭代器
+------------
+begin()/end()           cbegin()/cend()
+rbegin()/rend()         crbegin()/crend()
+所有迭代器均为随机访问迭代器
+
+8. 容量
+-----------
+empty()         是否为空
+size()          元素数量
+capacity()      当前容量
+reserve(n)      预分配 n 个元素空间
+shrink_to_fit() 收缩容量至当前大小
+clear()         清空所有元素（不释放内存）
+
+9. 修改操作
+------------
+push_back(val) / emplace_back(...)
+pop_back()
+push_front(val) / emplace_front(...)
+pop_front()
+insert(pos, val)
+insert(pos, n, val)
+insert(pos, first, last)
+insert(pos, {a,b,c})
+emplace(pos, ...)
+erase(pos)
+erase(first, last)
+remove(val)          删除第一个匹配项
+remove_all(val)      删除所有匹配项
+remove_if(pred)
+remove_all_if(pred)
+pop(index=npos)      取出并返回指定位置元素
+resize(n)
+resize(n, val)
+swap(other)
+
+10. 内置算法
+--------------
+排序：
+  sort(Order::Ascending/Descending)
+  sort(comp)
+  stable_sort()
+  stable_sort(comp)
+  is_sorted()
+  is_sorted(comp)
+
+变换：
+  reverse()
+  rotate_left(n)
+  rotate_right(n)
+  swap_at(i,j)
+
+去重：
+  unique()        移除连续重复项
+  unique_all()    先排序再全局去重
+
+查找：
+  find(val)
+  find_if(pred)
+  rfind(val)
+  rfind_if(pred)
+  index(val)
+  contains(val)
+  lower_bound(val)
+  upper_bound(val)
+  binary_search(val)
+  equal_range(val)
+
+计数：
+  count(val)
+  count_if(pred)
+
+替换：
+  replace(old_val, new_val)
+  replace_all(old_val, new_val)
+  replace_if(pred, new_val)
+  replace_all_if(pred, new_val)
+
+逻辑判断：
+  all_of(pred)
+  any_of(pred)
+  none_of(pred)
+
+数学统计：
+  min()
+  max()
+  sum()
+  product()
+  average()
+  median()
+  accumulate(init)
+  accumulate(init, op)
+
+生成与遍历：
+  fill(val)
+  iota(start_val)
+  generate(g)
+  shuffle(rng)
+  for_each(f)
+
+切片与拼接：
+  slice(s, e, step=1)
+  copy()
+  starts_with(other)
+  ends_with(other)
+
+11. 运算符
+-------------
+[]      下标访问
+== !=   相等比较
+< > <= >= 字典序比较
++       拼接（返回新 List）
++=      追加到自身
+
+12. 排序顺序枚举
+--------------
+List<T>::Order::Ascending   升序
+List<T>::Order::Descending  降序
+
+13. 非成员函数
+------------------------
+swap(List&, List&)
+erase(List&, val)
+erase_if(List&, pred)
+
+14. C++17 类模板推导
+-----------------------------
+List{1,2,3} 自动推导为 List<int>
+
+15. 分配器支持
+---------------------
+支持 std::allocator_traits，兼容状态分配器，遵循 POCCA/POCMA/POCS
+
+16. 异常安全
+--------------------
+所有修改操作提供强异常安全，异常发生时保持原状态不变
+
+17. 线程安全
+-----------------
+非线程安全，多线程访问需外部同步
+
+18. 调试模式
+--------------
+定义 NDEBUG 或 LIST_NO_SELF_CHECK 关闭容器自检
+
+19. 性能说明
+---------------------
+- 扩容因子：1.5 倍
+- 可平凡复制类型使用 memcpy/memmove 加速
+- 优先使用 noexcept 移动，否则拷贝
+- 批量插入前先 reserve 可避免多次扩容
+
+20. 版本差异
+-----------------------
+功能                List     List_pro   List_compatible
+C++ 标准            C++14    C++17/20   部分 C++14
+if constexpr        否       是         否
+[[nodiscard]]       否       是         否
+likely/unlikely     否       是         否
+<=> 三路比较        否       C++20支持  否
+类模板推导指南      条件支持 是         否
+老编译器兼容        否       否         是
