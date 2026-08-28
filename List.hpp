@@ -1204,9 +1204,10 @@ private:
     }
 
     void relocate_trivial(pointer new_data, std::true_type) {
-        std::memcpy(new_data, data_, sz_ * sizeof(T));
+        if (sz_ > 0) std::memcpy(new_data, data_, sz_ * sizeof(T));
     }
     void relocate_trivial(pointer new_data, std::false_type) {
+        if (sz_ == 0) return;
         std::uninitialized_copy(std::make_move_iterator(data_),
                                 std::make_move_iterator(data_ + sz_),
                                 new_data);
@@ -1222,9 +1223,9 @@ private:
     void insert_realloc_dispatch(pointer new_data, size_type new_cap, size_type idx,
                                   size_type n, const T& val, std::true_type) {
         size_type old_sz = sz_;
-        std::memcpy(new_data, data_, idx * sizeof(T));
+        if (idx > 0) std::memcpy(new_data, data_, idx * sizeof(T));
         std::uninitialized_fill_n(new_data + idx, n, val);
-        std::memcpy(new_data + idx + n, data_ + idx, (old_sz - idx) * sizeof(T));
+        if (old_sz > idx) std::memcpy(new_data + idx + n, data_ + idx, (old_sz - idx) * sizeof(T));
         destroy_all();
         raw_dealloc(data_, cap_);
         data_ = new_data; cap_ = new_cap; sz_ = old_sz + n;
