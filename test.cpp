@@ -15,6 +15,7 @@
 #include <random>
 #include <sstream>
 #include <functional>
+#include <type_traits>
 
 /* ========== 测试基础设施 ========== */
 
@@ -37,7 +38,9 @@ template <typename A, typename B, typename Msg>
 void check_eq_impl(A a, B b, const Msg& msg) {
     std::ostringstream full;
     full << msg << "  got=" << a << "  expected=" << b;
-    CHECK(a == b, full.str());
+    /* 统一到 common_type 再比较，避免无符号/有符号比较告警（-Werror=sign-compare） */
+    using common_t = typename std::common_type<A, B>::type;
+    CHECK(static_cast<common_t>(a) == static_cast<common_t>(b), full.str());
 }
 #define CHECK_EQ(a, b) check_eq_impl(a, b, "")
 #define CHECK_EQ3(a, b, msg) check_eq_impl(a, b, msg)
@@ -449,6 +452,95 @@ void test_strings() {
     CHECK_EQ(l[0], "world");
 }
 
+/* 析构计数探针：验证插入搬移路径无 double-free / 泄漏（ctor 与 dtor 平衡）。 */
+struct Tracked {
+    int val;
+    static int ctor;
+    static int dtor;
+    Tracked(int v = 0) : val(v) { ++ctor; }
+    Tracked(const Tracked& o) : val(o.val) { ++ctor; }
+    Tracked(Tracked&& o) noexcept : val(o.val) { o.val = -1; ++ctor; }
+    Tracked& operator=(const Tracked& o) { val = o.val; return *this; }
+    Tracked& operator=(Tracked&& o) noexcept { val = o.val; o.val = -1; return *this; }
+    ~Tracked() { ++dtor; }
+    bool operator==(const Tracked& o) const { return val == o.val; }
+};
+int Tracked::ctor = 0;
+int Tracked::dtor = 0;
+
+void test_insert_middle_nontrivial() {
+    section("非平凡类型 insert 到中间位置（非 realloc）");
+
+    // std::string 验证元素序列正确（覆盖 shift_right 非平凡路径）
+    {
+        List<std::string> l;
+        for (int i = 0; i < 5; i++) l.push_back(std::to_string(i));
+        l.reserve(20);
+        l.insert(l.cbegin() + 2, "X");
+        CHECK_EQ(l.size(), 6);
+        CHECK_EQ(l[0], "0"); CHECK_EQ(l[1], "1"); CHECK_EQ(l[2], "X");
+        CHECK_EQ(l[3], "2"); CHECK_EQ(l[4], "3"); CHECK_EQ(l[5], "4");
+    }
+
+    // 析构计数探针验证无 double-free / 泄漏
+    {
+        Tracked::ctor = 0; Tracked::dtor = 0;
+        {
+            List<Tracked> l;
+            for (int i = 0; i < 5; i++) l.emplace_back(i);
+            l.reserve(20);
+            l.insert(l.cbegin() + 2, Tracked(99));
+            CHECK_EQ(l.size(), 6);
+            CHECK_EQ(l[2].val, 99);
+            CHECK_EQ(l[3].val, 2);
+            CHECK_EQ(l[4].val, 3);
+        }
+        CHECK_EQ3(Tracked::ctor, Tracked::dtor, "Tracked ctor/dtor 平衡");
+    }
+}
+
+void test_insert_shift_gap_overflow() {
+    section("insert(pos,n,val) n > sz_-idx（shift_right case 2 洞边界）");
+
+    // Bug B 回归：count > sz_-from 时，末尾销毁范围需 clamp 到 sz_，
+    // 否则销毁未初始化内存（UB）
+    List<std::string> l;
+    for (int i = 0; i < 3; i++) l.push_back(std::to_string(i));  // {0,1,2}
+    l.reserve(20);
+    l.insert(l.cbegin() + 2, 5, "X");  // n=5 > sz_-idx=1，触发 case 2
+    CHECK_EQ(l.size(), 8);
+    CHECK_EQ(l[0], "0"); CHECK_EQ(l[1], "1");
+    CHECK_EQ(l[2], "X"); CHECK_EQ(l[3], "X"); CHECK_EQ(l[4], "X");
+    CHECK_EQ(l[5], "X"); CHECK_EQ(l[6], "X"); CHECK_EQ(l[7], "2");
+}
+
+void test_max_size_guards() {
+    section("max_size / 溢出守卫");
+
+    List<int> l;
+    bool caught = false;
+    try { l.reserve(l.max_size() + 1); } catch (std::length_error&) { caught = true; }
+    CHECK(caught, "reserve(>max_size) throws length_error");
+
+    caught = false;
+    try { l.resize(l.max_size() + 1); } catch (std::length_error&) { caught = true; }
+    CHECK(caught, "resize(>max_size) throws length_error");
+
+    caught = false;
+    try { l.assign(l.max_size() + 1, 1); } catch (std::length_error&) { caught = true; }
+    CHECK(caught, "assign(>max_size) throws length_error");
+
+    // 边界内操作不受影响
+    l.reserve(8);
+    l.assign(4, 7);
+    CHECK_EQ(l.size(), 4);
+    CHECK_EQ(l[0], 7);
+    CHECK_EQ(l[3], 7);
+    l.resize(6, 9);
+    CHECK_EQ(l.size(), 6);
+    CHECK_EQ(l[4], 9);
+}
+
 void test_stress_oracle() {
     section("随机对拍（1000 次操作）");
 
@@ -532,6 +624,60 @@ struct ThrowOnCopy {
 int ThrowOnCopy::copy_count = 0;
 int ThrowOnCopy::throw_after = -1;
 
+/* 不可拷贝、move 构造抛异常的类型：
+ * 覆盖 shift_right 的 throwing-move 路径（既非 nothrow-move 又不可拷贝，pick_move 走 move）。
+ * move 构造抛异常前不改源，因此回滚后容器应保持原值。 */
+struct ThrowOnMove {
+    int val;
+    static int move_count;
+    static int throw_after;
+    static int ctor;
+    static int dtor;
+    ThrowOnMove(int v = 0) : val(v) { ++ctor; }
+    ThrowOnMove(const ThrowOnMove&) = delete;
+    ThrowOnMove& operator=(const ThrowOnMove&) = delete;
+    ThrowOnMove(ThrowOnMove&& o) : val(o.val) {
+        if (++move_count > throw_after && throw_after >= 0)
+            throw std::runtime_error("simulated move failure");
+        ++ctor;
+    }
+    ThrowOnMove& operator=(ThrowOnMove&& o) { val = o.val; return *this; }
+    ~ThrowOnMove() { ++dtor; }
+    bool operator==(const ThrowOnMove& o) const { return val == o.val; }
+    bool operator!=(const ThrowOnMove& o) const { return val != o.val; }
+    bool operator<(const ThrowOnMove& o) const { return val < o.val; }
+};
+int ThrowOnMove::move_count = 0;
+int ThrowOnMove::throw_after = -1;
+int ThrowOnMove::ctor = 0;
+int ThrowOnMove::dtor = 0;
+
+/* 确定性失败分配器：fail_after >= 0 时，第 fail_after + 1 次 allocate 抛 bad_alloc。 */
+template <typename T>
+struct ThrowingAlloc {
+    using value_type = T;
+    static int alloc_count;
+    static int fail_after;
+
+    ThrowingAlloc() noexcept {}
+    template <typename U>
+    ThrowingAlloc(const ThrowingAlloc<U>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        if (fail_after >= 0 && alloc_count++ >= fail_after)
+            throw std::bad_alloc();
+        return std::allocator<T>{}.allocate(n);
+    }
+    void deallocate(T* p, std::size_t n) noexcept {
+        std::allocator<T>{}.deallocate(p, n);
+    }
+    template <typename U> struct rebind { using other = ThrowingAlloc<U>; };
+    bool operator==(const ThrowingAlloc&) const noexcept { return true; }
+    bool operator!=(const ThrowingAlloc&) const noexcept { return false; }
+};
+template <typename T> int ThrowingAlloc<T>::alloc_count = 0;
+template <typename T> int ThrowingAlloc<T>::fail_after = -1;
+
 void test_exception_safety_rollback() {
     section("异常安全回滚（ThrowOnCopy）");
 
@@ -575,27 +721,233 @@ void test_exception_safety_rollback() {
     CHECK_EQ(l.size(), 10);
 }
 
-void test_exception_safety_alloc() {
-    section("异常安全分配器（std::string 内部异常）");
+void test_exception_safety_bad_alloc() {
+    section("异常安全（确定性 bad_alloc）");
 
-    // std::string 的复制可能因内存分配抛异常
-    // 验证 List 在批量插入过程中抛异常时回滚
-    List<std::string> l;
-    for (int i = 0; i < 5; i++) l.emplace_back("hello");
+    using L = List<std::string, ThrowingAlloc<std::string>>;
+    ThrowingAlloc<std::string>::alloc_count = 0;
+    ThrowingAlloc<std::string>::fail_after = -1;
 
-    // 模拟一个超长字符串触发分配失败
-    std::string big(1ULL << 25, 'x');  // 32MB 字符串
+    L l;
+    // next_cap：0 → 6（min_cap=4 起 1.5 倍增长），6 个元素填满 cap_=6
+    for (int i = 0; i < 6; i++) l.emplace_back("hello");
+    CHECK_EQ(l.size(), 6);
+    CHECK_EQ(l.capacity(), 6);
+
+    // push_back 触发 grow 时 allocate 抛 bad_alloc：size 与内容均不变
+    ThrowingAlloc<std::string>::alloc_count = 0;
+    ThrowingAlloc<std::string>::fail_after = 0;  // 下一次 allocate 就抛
     bool caught = false;
     try {
-        l.push_back(big);  // 可能抛 bad_alloc
-    } catch (std::exception&) {
+        l.push_back("world");
+    } catch (std::bad_alloc&) {
         caught = true;
     }
-    // 如果抛了，size 应该不变
-    if (caught) {
-        CHECK_EQ(l.size(), 5);
-    } else {
-        CHECK_EQ(l.size(), 6);
+    ThrowingAlloc<std::string>::fail_after = -1;
+    CHECK(caught, "push_back threw bad_alloc on grow");
+    CHECK_EQ(l.size(), 6);
+    for (int i = 0; i < 6; i++) CHECK_EQ(l[static_cast<size_t>(i)], "hello");
+
+    // emplace 重分配插入时 allocate 抛：逐位校验内容
+    ThrowingAlloc<std::string>::alloc_count = 0;
+    ThrowingAlloc<std::string>::fail_after = 0;
+    caught = false;
+    try {
+        l.emplace(l.cbegin() + 2, "x");
+    } catch (std::bad_alloc&) {
+        caught = true;
+    }
+    ThrowingAlloc<std::string>::fail_after = -1;
+    CHECK(caught, "emplace threw bad_alloc on realloc");
+    CHECK_EQ(l.size(), 6);
+    for (int i = 0; i < 6; i++) CHECK_EQ(l[static_cast<size_t>(i)], "hello");
+}
+
+/* ========== 重分配强异常保证：异常后元素内容逐位相等 ========== */
+
+void check_sequence_unchanged(const List<ThrowOnCopy>& l, size_t n, const char* ctx) {
+    CHECK_EQ3(l.size(), n, std::string(ctx) + " size");
+    for (size_t i = 0; i < n; i++)
+        CHECK_EQ3(l[i].val, static_cast<int>(i), std::string(ctx) + " [" + std::to_string(i) + "]");
+}
+
+void test_exception_safety_realloc_strong() {
+    section("异常安全（重分配强保证，逐位校验）");
+
+    // ThrowOnCopy：nothrow-move 且可拷贝，正是修复前 pick_move 走 move 丢值的类型
+    // 场景 A：emplace_realloc（emplace 触发重分配，新元素构造抛）
+    {
+        ThrowOnCopy::throw_after = -1;
+        ThrowOnCopy::copy_count = 0;
+        List<ThrowOnCopy> l;
+        l.reserve(4);
+        for (int i = 0; i < 4; i++) l.emplace_back(i);
+        CHECK_EQ(l.capacity(), 4);
+
+        // 前段 [0,2) 拷贝 2 次，新元素拷贝是第 3 次；throw_after=2 → 新元素构造抛
+        ThrowOnCopy::copy_count = 0;
+        ThrowOnCopy::throw_after = 2;
+        ThrowOnCopy val(99);
+        bool caught = false;
+        try {
+            l.emplace(l.cbegin() + 2, val);
+        } catch (std::runtime_error&) {
+            caught = true;
+        }
+        CHECK(caught, "emplace realloc threw on new-element copy");
+        check_sequence_unchanged(l, 4, "emplace_realloc");
+    }
+
+    // 场景 B：insert_realloc（insert(pos, n, val) 重分配，填充中途抛）
+    {
+        ThrowOnCopy::throw_after = -1;
+        ThrowOnCopy::copy_count = 0;
+        List<ThrowOnCopy> l;
+        l.reserve(4);
+        for (int i = 0; i < 4; i++) l.emplace_back(i);
+
+        // 前段 [0,1) 拷贝 1 次，填充 3 个：第 2、3 次成功，第 4 次抛
+        ThrowOnCopy::copy_count = 0;
+        ThrowOnCopy::throw_after = 3;
+        ThrowOnCopy val(100);
+        bool caught = false;
+        try {
+            l.insert(l.cbegin() + 1, 3, val);
+        } catch (std::runtime_error&) {
+            caught = true;
+        }
+        CHECK(caught, "insert(pos,n,val) realloc threw mid-fill");
+        check_sequence_unchanged(l, 4, "insert_realloc");
+    }
+
+    // 场景 C：insert_range_realloc（范围插入重分配，拷贝源区间中途抛）
+    {
+        ThrowOnCopy::throw_after = -1;
+        ThrowOnCopy::copy_count = 0;
+        List<ThrowOnCopy> l;
+        l.reserve(4);
+        for (int i = 0; i < 4; i++) l.emplace_back(i);
+
+        std::vector<ThrowOnCopy> src;
+        for (int i = 0; i < 5; i++) src.emplace_back(100 + i);
+
+        // 范围 5 次拷贝：第 1、2 次成功，第 3 次抛（throw_after=2）
+        ThrowOnCopy::copy_count = 0;
+        ThrowOnCopy::throw_after = 2;
+        bool caught = false;
+        try {
+            l.insert(l.cbegin(), src.begin(), src.end());
+        } catch (std::runtime_error&) {
+            caught = true;
+        }
+        CHECK(caught, "insert(range) realloc threw mid-copy");
+        check_sequence_unchanged(l, 4, "insert_range_realloc");
+    }
+}
+
+void test_exception_safety_throw_after_n() {
+    section("异常安全（throw_after = N 中途回滚）");
+
+    ThrowOnCopy::throw_after = -1;
+    ThrowOnCopy::copy_count = 0;
+    List<ThrowOnCopy> l;
+    for (int i = 0; i < 8; i++) l.emplace_back(i);
+    l.reserve(16);  // cap_ 从 9 扩到 16，确保 8+6=14 <= 16 走非 realloc（shift_right）
+
+    // 非重分配：shift_right 搬移走 move（noexcept，不计数）
+    // 填充 6 个拷贝：第 1~3 次成功，第 4 次抛（throw_after=3）
+    ThrowOnCopy::copy_count = 0;
+    ThrowOnCopy::throw_after = 3;
+    ThrowOnCopy val(100);
+    bool caught = false;
+    try {
+        l.insert(l.cbegin() + 2, 6, val);
+    } catch (std::runtime_error&) {
+        caught = true;
+    }
+    CHECK(caught, "insert(pos,n,val) threw mid-copy (throw_after=3)");
+    check_sequence_unchanged(l, 8, "throw_after=N");
+}
+
+void test_exception_safety_throw_on_move() {
+    section("异常安全（ThrowOnMove move 抛，shift_right 回滚）");
+
+    ThrowOnMove::throw_after = -1;
+    ThrowOnMove::move_count = 0;
+    List<ThrowOnMove> l;
+    for (int i = 0; i < 8; i++) l.emplace_back(i);
+
+    // 无重分配 insert(rvalue)：shift_right 搬移走 move（ThrowOnMove 不可拷贝），
+    // throw_after=0 → 第 1 次 move 构造（未初始化尾部）就抛；
+    // 回滚后源元素 [2, 8) 保留且值不变（move 抛前不改源）。
+    // 旧实现此路径会继续搬移并销毁源元素，破坏容器数据。
+    ThrowOnMove::move_count = 0;
+    ThrowOnMove::throw_after = 0;
+    ThrowOnMove val(99);
+    bool caught = false;
+    try {
+        l.insert(l.cbegin() + 2, std::move(val));
+    } catch (std::runtime_error&) {
+        caught = true;
+    }
+    CHECK(caught, "insert(rvalue) threw on move failure during shift_right");
+    CHECK_EQ(l.size(), 8);
+    for (int i = 0; i < 8; i++) CHECK_EQ(l[static_cast<size_t>(i)].val, i);
+
+    // 重置后正常插入仍可用（容器未损坏）
+    ThrowOnMove::throw_after = -1;
+    ThrowOnMove::move_count = 0;
+    l.insert(l.cbegin() + 2, ThrowOnMove(99));
+    CHECK_EQ(l.size(), 9);
+    CHECK_EQ(l[2].val, 99);
+    CHECK_EQ(l[3].val, 2);
+}
+
+void test_shift_right_mid_move_no_leak() {
+    section("shift_right 阶段 A 中途 move 抛无泄漏（Bug A 回归）");
+
+    ThrowOnMove::ctor = 0; ThrowOnMove::dtor = 0;
+    ThrowOnMove::move_count = 0; ThrowOnMove::throw_after = -1;
+    {
+        List<ThrowOnMove> l;
+        for (int i = 0; i < 8; i++) l.emplace_back(i);
+        l.reserve(20);  // 确保非 realloc
+
+        ThrowOnMove src[3] = { ThrowOnMove(100), ThrowOnMove(101), ThrowOnMove(102) };
+        ThrowOnMove::move_count = 0;
+        ThrowOnMove::throw_after = 1;  // 第 2 次 move 抛（阶段 A 已构造 1 个）
+        bool caught = false;
+        try {
+            l.insert(l.cbegin() + 2,
+                     std::make_move_iterator(src),
+                     std::make_move_iterator(src + 3));
+        } catch (std::runtime_error&) { caught = true; }
+        CHECK(caught, "insert_range move 中途抛");
+        CHECK_EQ(l.size(), 8);
+    }
+    CHECK_EQ3(ThrowOnMove::ctor, ThrowOnMove::dtor, "ThrowOnMove ctor/dtor 平衡（无泄漏）");
+}
+
+void test_shrink_to_fit_push_back() {
+    section("shrink_to_fit 缩到 1 后 push_back（回归 next_cap）");
+
+    List<int> l;
+    l.push_back(42);
+    l.shrink_to_fit();
+    CHECK_EQ(l.capacity(), 1);
+
+    l.push_back(7);   // 触发 grow：next_cap(1) 必须严格大于 1
+    CHECK_EQ(l.size(), 2);
+    CHECK_EQ(l.capacity(), 2);
+    CHECK_EQ(l[0], 42);
+    CHECK_EQ(l[1], 7);
+
+    // 继续增长路径正常
+    for (int i = 0; i < 10; i++) l.push_back(i);
+    CHECK_EQ(l.size(), 12);
+    for (size_t i = 0; i < l.size(); i++) {
+        int expect = (i == 0) ? 42 : (i == 1 ? 7 : static_cast<int>(i) - 2);
+        CHECK_EQ3(l[i], expect, "shrink regression [" + std::to_string(i) + "]");
     }
 }
 
@@ -611,11 +963,19 @@ int main() {
     test_algorithms();
     test_remove_if();
     test_strings();
+    test_insert_middle_nontrivial();
+    test_insert_shift_gap_overflow();
     test_operator_compare();
     test_std_swap();
     test_concat();
     test_exception_safety_rollback();
-    test_exception_safety_alloc();
+    test_exception_safety_throw_on_move();
+    test_shift_right_mid_move_no_leak();
+    test_exception_safety_throw_after_n();
+    test_exception_safety_realloc_strong();
+    test_exception_safety_bad_alloc();
+    test_shrink_to_fit_push_back();
+    test_max_size_guards();
     test_stress_oracle();
 
     summary();

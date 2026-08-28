@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} C++${{ matrix.std }} (${{ matrix.config.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        std: [c++14, c++17, c++20]
+        config:
+          - { name: debug,    flags: "-O0" }
+          - { name: release,  flags: "-O2 -DNDEBUG" }
+          # NDEBUG 关闭 debug 自检（check_invariants），让 ASan/UBSan 直接抓
+          # release 语义下的堆越界，覆盖 debug 自检抓不到的场景
+          - { name: sanitize, flags: "-O1 -g -DNDEBUG -fsanitize=address,undefined" }
+    env:
+      CXXFLAGS: "-std=${{ matrix.std }} ${{ matrix.config.flags }} -Wall -Wextra -Werror"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ clang
+
+      - name: Compile test_list
+        run: ${{ matrix.compiler }} $CXXFLAGS -o test_list test.cpp
+
+      - name: Run test_list
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ./test_list

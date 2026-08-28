@@ -333,6 +333,7 @@ public:
 
     /* ---- assign ---- */
     void assign(size_type n, const T& val) {
+        if (n > max_size()) throw std::length_error("List::assign");
         if (n > cap_) {
             List tmp(n, val, alloc());
             tmp.swap(*this);
@@ -420,6 +421,7 @@ public:
 
     void reserve(size_type new_cap) {
         if (new_cap <= cap_) return;
+        if (new_cap > max_size()) throw std::length_error("List::reserve");
         auto new_data = raw_alloc(new_cap);
         relocate(new_data, new_cap, typename std::is_nothrow_move_constructible<T>::type());
     }
@@ -451,6 +453,7 @@ public:
         if (sz_ >= cap_) {
             auto new_cap = next_cap();
             if (new_cap < sz_ + 1) new_cap = sz_ + 1;
+            if (new_cap > max_size()) throw std::length_error("List::emplace");
             auto new_data = raw_alloc(new_cap);
             emplace_realloc(new_data, new_cap, idx, std::forward<Args>(args)...);
             return iterator(data_ + idx);
@@ -480,9 +483,11 @@ public:
         if (n == 0) return iterator(data_ + (pos - cbegin()));
         size_type idx = static_cast<size_type>(pos - cbegin());
         if (idx > sz_) throw std::out_of_range("List::insert");
+        if (n > max_size() - sz_) throw std::length_error("List::insert");
         auto needed = sz_ + n;
         if (needed > cap_) {
             auto new_cap = std::max(next_cap(), needed);
+            if (new_cap > max_size()) throw std::length_error("List::insert");
             auto new_data = raw_alloc(new_cap);
             insert_realloc(new_data, new_cap, idx, n, val);
             return iterator(data_ + idx);
@@ -602,6 +607,7 @@ public:
             LIST_ASSERT_INV();
             return;
         }
+        if (n > max_size()) throw std::length_error("List::resize");
         if (n > cap_) reserve(n);
         for (; sz_ < n; ++sz_) alloc_traits::construct(alloc(), &data_[sz_]);
         LIST_ASSERT_INV();
@@ -614,6 +620,7 @@ public:
             LIST_ASSERT_INV();
             return;
         }
+        if (n > max_size()) throw std::length_error("List::resize");
         if (n > cap_) reserve(n);
         for (; sz_ < n; ++sz_) alloc_traits::construct(alloc(), &data_[sz_], val);
         LIST_ASSERT_INV();
@@ -991,7 +998,7 @@ public:
     /* ========== Self-checking (debug only) ========== */
 #ifndef LIST_NO_SELF_CHECK
     void check_invariants() const {
-        if (sz_ > cap_ + 15)
+        if (sz_ > cap_)
             throw std::logic_error("List invariant violated: size > capacity");
         if (cap_ == 0 && data_ != nullptr)
             throw std::logic_error("List invariant violated: cap==0 but data!=nullptr");
@@ -1283,10 +1290,12 @@ private:
         auto n = static_cast<size_type>(std::distance(first, last));
         if (n == 0) return iterator(data_ + idx);
         if (idx > sz_) throw std::out_of_range("List::insert");
+        if (n > max_size() - sz_) throw std::length_error("List::insert");
 
         auto needed = sz_ + n;
         if (needed > cap_) {
             auto new_cap = std::max(next_cap(), needed);
+            if (new_cap > max_size()) throw std::length_error("List::insert");
             auto new_data = raw_alloc(new_cap);
             insert_range_realloc(new_data, new_cap, idx, first, last, n);
             return iterator(data_ + idx);
@@ -1376,13 +1385,16 @@ private:
     /* ---- Growth ---- */
     void grow() {
         size_type new_cap = next_cap();
+        if (new_cap <= cap_) new_cap = cap_ + 1;
+        if (new_cap > max_size()) throw std::length_error("List::grow");
         auto new_data = raw_alloc(new_cap);
         relocate(new_data, new_cap, typename std::is_nothrow_move_constructible<T>::type());
     }
 
     size_type next_cap() const noexcept {
         size_type base = (cap_ == 0) ? min_cap : cap_;
-        return base + (base >> 1);
+        size_type grown = base + (base >> 1);
+        return grown > base ? grown : base + 1;
     }
 };
 

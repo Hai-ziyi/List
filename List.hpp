@@ -326,6 +326,7 @@ public:
 
     /* ---- assign ---- */
     void assign(size_type n, const T& val) {
+        if (n > max_size()) throw std::length_error("List::assign");
         if (n > cap_) {
             List tmp(n, val, alloc());
             tmp.swap(*this);
@@ -413,6 +414,7 @@ public:
 
     void reserve(size_type new_cap) {
         if (new_cap <= cap_) return;
+        if (new_cap > max_size()) throw std::length_error("List::reserve");
         auto new_data = raw_alloc(new_cap);
         relocate(new_data, new_cap, typename std::is_nothrow_move_constructible<T>::type());
     }
@@ -444,6 +446,7 @@ public:
         if (sz_ >= cap_) {
             auto new_cap = next_cap();
             if (new_cap < sz_ + 1) new_cap = sz_ + 1;
+            if (new_cap > max_size()) throw std::length_error("List::emplace");
             auto new_data = raw_alloc(new_cap);
             emplace_realloc(new_data, new_cap, idx, std::forward<Args>(args)...);
             return iterator(data_ + idx);
@@ -473,9 +476,11 @@ public:
         if (n == 0) return iterator(data_ + (pos - cbegin()));
         size_type idx = static_cast<size_type>(pos - cbegin());
         if (idx > sz_) throw std::out_of_range("List::insert");
+        if (n > max_size() - sz_) throw std::length_error("List::insert");
         auto needed = sz_ + n;
         if (needed > cap_) {
             auto new_cap = std::max(next_cap(), needed);
+            if (new_cap > max_size()) throw std::length_error("List::insert");
             auto new_data = raw_alloc(new_cap);
             insert_realloc(new_data, new_cap, idx, n, val);
             return iterator(data_ + idx);
@@ -595,6 +600,7 @@ public:
             LIST_ASSERT_INV();
             return;
         }
+        if (n > max_size()) throw std::length_error("List::resize");
         if (n > cap_) reserve(n);
         for (; sz_ < n; ++sz_) alloc_traits::construct(alloc(), &data_[sz_]);
         LIST_ASSERT_INV();
@@ -607,6 +613,7 @@ public:
             LIST_ASSERT_INV();
             return;
         }
+        if (n > max_size()) throw std::length_error("List::resize");
         if (n > cap_) reserve(n);
         for (; sz_ < n; ++sz_) alloc_traits::construct(alloc(), &data_[sz_], val);
         LIST_ASSERT_INV();
@@ -974,9 +981,7 @@ public:
     /* ========== Self-checking (debug only) ========== */
 #ifndef LIST_NO_SELF_CHECK
     void check_invariants() const {
-        // 允许 sz_ 略超 cap_（shift_right / rotate 等操作的中间状态）
-        // 完整正确性由 LIST_NO_SELF_CHECK 下的随机对拍（16281 断言）保证
-        if (sz_ > cap_ + 15)
+        if (sz_ > cap_)
             throw std::logic_error("List invariant violated: size > capacity");
         if (cap_ == 0 && data_ != nullptr)
             throw std::logic_error("List invariant violated: cap==0 but data!=nullptr");
@@ -1033,6 +1038,20 @@ private:
     static const T&  pick_move(T& x, std::false_type) noexcept { return x; }
     static auto      pick_move(T& x) -> decltype(pick_move(x, should_move())) {
         return pick_move(x, should_move());
+    }
+
+    /* ---- Strong-guarantee helper for realloc insert paths ----
+     * 重分配插入（emplace/insert/insert_range）时：对可拷贝类型走拷贝，
+     * 这样若后续构造新元素抛异常，旧容器元素值不被搬走（强异常保证，
+     * 与 std::vector 对 CopyInsertable 类型的做法一致）。
+     * 仅对不可拷贝类型退回 move（此时降级为基本保证）。
+     * 注意：relocate（reserve/grow/shrink 用）无此问题，仍用 pick_move。 */
+    using realloc_pick_tag = typename std::conditional<
+        std::is_copy_constructible<T>::value, std::true_type, std::false_type>::type;
+    static const T& realloc_pick(T& x, std::true_type) noexcept  { return x; }
+    static T&&      realloc_pick(T& x, std::false_type) noexcept { return static_cast<T&&>(x); }
+    static auto     realloc_pick(T& x) -> decltype(realloc_pick(x, realloc_pick_tag())) {
+        return realloc_pick(x, realloc_pick_tag());
     }
 
     /* ---- Trivial copy helpers ---- */
@@ -1118,24 +1137,31 @@ private:
         std::memmove(data_ + from + count, data_ + from, (sz_ - from) * sizeof(T));
     }
     void shift_right_impl(size_type from, size_type count, std::false_type) {
-        size_type i = sz_;
+        /* 把 [from, sz_) 右移 count 位到 [from+count, sz_+count)。
+         * 目标区拆两段，避免 construct 覆盖活对象（双构造 UB）：
+         *   A. 未初始化尾部 [sz_, sz_+count) 用 construct（pick_move，可能抛）；
+         *   B. 重叠区 [from+count, sz_) 用 move 赋值（活对象）。
+         * 搬移期间不销毁源元素，全部成功后才统一销毁源区 [from, sz_)。
+         * 阶段 A 抛异常时源区未被触碰（对可拷贝类型即强保证）。 */
+        const size_type tail = (count < sz_ - from) ? count : (sz_ - from);
+        size_type done = 0;
         try {
-            for (; i > from; --i) {
-                alloc_traits::construct(alloc(), &data_[i + count - 1], std::move(data_[i - 1]));
-                destroy_at(&data_[i - 1]);
-            }
+            for (size_type j = 0; j < tail; ++j, ++done)
+                alloc_traits::construct(alloc(), &data_[sz_ + count - 1 - j],
+                                        pick_move(data_[sz_ - 1 - j]));
         } catch (...) {
-            for (size_type j = sz_ + count - 1; j >= i + count - 1 && j >= count; --j) {
-                destroy_at(&data_[j]);
-                if (j == i + count - 1) break;
-            }
-            for (size_type j = from; j < i; ++j) {
-                if (j + count >= sz_ + count) break;
-                alloc_traits::construct(alloc(), &data_[j + count], std::move(data_[j]));
-                destroy_at(&data_[j]);
-            }
+            /* 回滚：销毁本次已构造的尾部 [sz_+count-done, sz_+count)，
+             * 源区 [from, sz_) 未被销毁、值保留。
+             * 对既非 nothrow-move 又不可拷贝的类型，搬移走 move 且可能抛，
+             * 此处只能保证基本保证，与 std::vector 一致。 */
+            for (size_type j = 0; j < done; ++j)
+                destroy_at(&data_[sz_ + count - 1 - j]);
             throw;
         }
+        for (size_type j = sz_ - 1; j >= from + count; --j)
+            data_[j] = std::move(data_[j - count]);
+        const size_type gap_end = (from + count < sz_) ? (from + count) : sz_;
+        for (size_type j = from; j < gap_end; ++j) destroy_at(&data_[j]);
     }
 
     /* ---- Undo shift_right (for exception rollback) ---- */
@@ -1212,12 +1238,12 @@ private:
         try {
             for (; constructed < idx; ++constructed)
                 alloc_traits::construct(alloc(), &new_data[constructed],
-                                        pick_move(data_[constructed]));
+                                        realloc_pick(data_[constructed]));
             for (size_type i = 0; i < n; ++i, ++constructed)
                 alloc_traits::construct(alloc(), &new_data[idx + i], val);
             for (size_type j = 0; j < old_sz - idx; ++j, ++constructed)
                 alloc_traits::construct(alloc(), &new_data[idx + n + j],
-                                        pick_move(data_[idx + j]));
+                                        realloc_pick(data_[idx + j]));
         } catch (...) {
             for (size_type j = 0; j < constructed; ++j) destroy_at(&new_data[j]);
             raw_dealloc(new_data, new_cap);
@@ -1236,12 +1262,12 @@ private:
         try {
             for (; constructed < idx; ++constructed)
                 alloc_traits::construct(alloc(), &new_data[constructed],
-                                        pick_move(data_[constructed]));
+                                        realloc_pick(data_[constructed]));
             alloc_traits::construct(alloc(), &new_data[idx], std::forward<Args>(args)...);
             ++constructed;
             for (size_type j = 0; j < old_sz - idx; ++j, ++constructed)
                 alloc_traits::construct(alloc(), &new_data[idx + 1 + j],
-                                        pick_move(data_[idx + j]));
+                                        realloc_pick(data_[idx + j]));
         } catch (...) {
             for (size_type j = 0; j < constructed; ++j) destroy_at(&new_data[j]);
             raw_dealloc(new_data, new_cap);
@@ -1268,10 +1294,12 @@ private:
         auto n = static_cast<size_type>(std::distance(first, last));
         if (n == 0) return iterator(data_ + idx);
         if (idx > sz_) throw std::out_of_range("List::insert");
+        if (n > max_size() - sz_) throw std::length_error("List::insert");
 
         auto needed = sz_ + n;
         if (needed > cap_) {
             auto new_cap = std::max(next_cap(), needed);
+            if (new_cap > max_size()) throw std::length_error("List::insert");
             auto new_data = raw_alloc(new_cap);
             insert_range_realloc(new_data, new_cap, idx, first, last, n);
             return iterator(data_ + idx);
@@ -1300,12 +1328,12 @@ private:
         try {
             for (; constructed < idx; ++constructed)
                 alloc_traits::construct(alloc(), &new_data[constructed],
-                                        pick_move(data_[constructed]));
+                                        realloc_pick(data_[constructed]));
             for (auto it = first; it != last; ++it, ++constructed)
                 alloc_traits::construct(alloc(), &new_data[constructed], *it);
             for (size_type j = 0; j < sz_ - idx; ++j, ++constructed)
                 alloc_traits::construct(alloc(), &new_data[constructed],
-                                        pick_move(data_[idx + j]));
+                                        realloc_pick(data_[idx + j]));
         } catch (...) {
             for (size_type j = 0; j < constructed; ++j) destroy_at(&new_data[j]);
             raw_dealloc(new_data, new_cap);
@@ -1361,13 +1389,16 @@ private:
     /* ---- Growth ---- */
     void grow() {
         size_type new_cap = next_cap();
+        if (new_cap <= cap_) new_cap = cap_ + 1;
+        if (new_cap > max_size()) throw std::length_error("List::grow");
         auto new_data = raw_alloc(new_cap);
         relocate(new_data, new_cap, typename std::is_nothrow_move_constructible<T>::type());
     }
 
     size_type next_cap() const noexcept {
         size_type base = (cap_ == 0) ? min_cap : cap_;
-        return base + (base >> 1);
+        size_type grown = base + (base >> 1);
+        return grown > base ? grown : base + 1;
     }
 };
 
